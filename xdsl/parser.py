@@ -12,6 +12,7 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 from enum import Enum, auto
 from io import StringIO
+import struct
 from typing import Any, NoReturn, TypeVar, Iterable, IO, cast, Literal, Sequence
 
 from xdsl.utils.exceptions import ParseError, MultipleSpansParseError
@@ -1853,8 +1854,14 @@ class Parser(ABC):
             self.raise_error(f"Dense literal attribute should have a static shape.")
 
         element_type = type.element_type
+        # if type(values[0]) == str:
+        if isinstance(values[0], str):
+            float_width = int(element_type.name[1:])
+            hex_digit_per_element = float_width//4
+            raw_string = values[0][3:-1]
+            data_values = [struct.unpack('!f', bytes.fromhex(raw_string[i:i+hex_digit_per_element]))[0] for i in range(0, len(raw_string), hex_digit_per_element)]
         # Convert list of elements to a list of values.
-        if shape != []:
+        elif shape != []:
             data_values = [value.to_type(self, element_type) for value in values]
         else:
             assert len(values) == 1, "Fatal error in parser"
@@ -2101,6 +2108,10 @@ class Parser(ABC):
             shape = [len(res)] + sub_literal_shape
             values = [elem for sub_list in res for elem in sub_list[0]]
             return values, shape
+        elif self._current_token.kind == Token.Kind.STRING_LIT:
+            token = self._consume_token(Token.Kind.STRING_LIT)
+            element = token.text
+            return [element], []
         else:
             element = self._parse_tensor_literal_element()
             return [element], []
