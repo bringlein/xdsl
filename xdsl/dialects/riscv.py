@@ -143,8 +143,23 @@ class RegisterType(Data[Register], TypeAttribute):
         return self.data.name
 
 
+@irdl_attr_definition
+class LabelAttr(Data[str]):
+    name = "riscv.label"
+
+    @staticmethod
+    def parse_parameter(parser: Parser) -> str:
+        return parser.parse_str_literal()
+
+    def print_parameter(self, printer: Printer) -> None:
+        printer.print_string_literal(self.data)
+
+
 class RISCVOp(Operation, ABC):
     pass
+
+
+# region Base Operation classes
 
 
 class RdRsRsOperation(IRDLOperation, RISCVOp, ABC):
@@ -184,16 +199,18 @@ class RdImmOperation(IRDLOperation, RISCVOp, ABC):
     """
 
     rd: Annotated[OpResult, RegisterType]
-    immediate: OpAttr[AnyIntegerAttr]
+    immediate: OpAttr[AnyIntegerAttr | LabelAttr]
 
     def __init__(
         self,
-        immediate: int | AnyIntegerAttr,
+        immediate: int | AnyIntegerAttr | str | LabelAttr,
         *,
         rd: RegisterType | Register | None = None,
     ):
         if isinstance(immediate, int):
             immediate = IntegerAttr.from_int_and_width(immediate, 32)
+        elif isinstance(immediate, str):
+            immediate = LabelAttr(immediate)
         if rd is None:
             rd = RegisterType(Register())
         elif isinstance(rd, Register):
@@ -216,15 +233,20 @@ class RdRsImmOperation(IRDLOperation, RISCVOp, ABC):
 
     rd: Annotated[OpResult, RegisterType]
     rs1: Annotated[Operand, RegisterType]
-    immediate: OpAttr[AnyIntegerAttr]
+    immediate: OpAttr[AnyIntegerAttr | LabelAttr]
 
     def __init__(
         self,
         rs1: Operation | SSAValue,
-        immediate: AnyIntegerAttr,
+        immediate: int | AnyIntegerAttr | str | LabelAttr,
         *,
         rd: RegisterType | Register | None = None,
     ):
+        if isinstance(immediate, int):
+            immediate = IntegerAttr(immediate, 32)
+        elif isinstance(immediate, str):
+            immediate = LabelAttr(immediate)
+
         if rd is None:
             rd = RegisterType(Register())
         elif isinstance(rd, Register):
@@ -234,6 +256,31 @@ class RdRsImmOperation(IRDLOperation, RISCVOp, ABC):
             attributes={
                 "immediate": immediate,
             },
+            result_types=[rd],
+        )
+
+
+class RdRsOperation(IRDLOperation, RISCVOp, ABC):
+    """
+    A base class for RISC-V pseudo-instructions that have one destination register and one
+    source register.
+    """
+
+    rd: Annotated[OpResult, RegisterType]
+    rs: Annotated[Operand, RegisterType]
+
+    def __init__(
+        self,
+        rs1: Operation | SSAValue,
+        *,
+        rd: RegisterType | Register | None = None,
+    ):
+        if rd is None:
+            rd = RegisterType(Register())
+        elif isinstance(rd, Register):
+            rd = RegisterType(rd)
+        super().__init__(
+            operands=[rs1],
             result_types=[rd],
         )
 
@@ -299,7 +346,7 @@ class NullaryOperation(IRDLOperation, RISCVOp, ABC):
         super().__init__()
 
 
-class CsrReadWriteOperation(IRDLOperation, ABC):
+class CsrReadWriteOperation(IRDLOperation, RISCVOp, ABC):
     """
     A base class for RISC-V operations performing a swap to/from a CSR.
 
@@ -348,7 +395,7 @@ class CsrReadWriteOperation(IRDLOperation, ABC):
             )
 
 
-class CsrBitwiseOperation(IRDLOperation, ABC):
+class CsrBitwiseOperation(IRDLOperation, RISCVOp, ABC):
     """
     A base class for RISC-V operations performing a masked bitwise operation on the
     CSR while returning the original value.
@@ -399,7 +446,7 @@ class CsrBitwiseOperation(IRDLOperation, ABC):
             )
 
 
-class CsrReadWriteImmOperation(IRDLOperation, ABC):
+class CsrReadWriteImmOperation(IRDLOperation, RISCVOp, ABC):
     """
     A base class for RISC-V operations performing a write immediate to/read from a CSR.
 
@@ -413,10 +460,12 @@ class CsrReadWriteImmOperation(IRDLOperation, ABC):
     rd: Annotated[OpResult, RegisterType]
     csr: OpAttr[AnyIntegerAttr]
     writeonly: OptOpAttr[UnitAttr]
+    immediate: OptOpAttr[AnyIntegerAttr]
 
     def __init__(
         self,
         csr: AnyIntegerAttr,
+        immediate: AnyIntegerAttr,
         *,
         writeonly: bool = False,
         rd: RegisterType | Register | None = None,
@@ -428,6 +477,7 @@ class CsrReadWriteImmOperation(IRDLOperation, ABC):
         super().__init__(
             attributes={
                 "csr": csr,
+                "immediate": immediate,
                 "writeonly": UnitAttr() if writeonly else None,
             },
             result_types=[rd],
@@ -445,7 +495,7 @@ class CsrReadWriteImmOperation(IRDLOperation, ABC):
             )
 
 
-class CsrBitwiseImmOperation(IRDLOperation, ABC):
+class CsrBitwiseImmOperation(IRDLOperation, RISCVOp, ABC):
     """
     A base class for RISC-V operations performing a masked bitwise operation on the
     CSR while returning the original value. The bitmask is specified in the 'immediate'
@@ -482,7 +532,9 @@ class CsrBitwiseImmOperation(IRDLOperation, ABC):
         )
 
 
-# RV32I/RV64I: Integer Computational Instructions (Section 2.4)
+# endregion
+
+# region RV32I/RV64I: 2.4 Integer Computational Instructions
 
 ## Integer Register-Immediate Instructions
 
@@ -642,6 +694,17 @@ class AuipcOp(RdImmOperation):
     name = "riscv.auipc"
 
 
+@irdl_op_definition
+class MVOp(RdRsOperation):
+    """
+    A pseudo instruction to copy contents of one register to another.
+
+    Equivalent to `addi rd, rs, 0`
+    """
+
+    name = "riscv.mv"
+
+
 ## Integer Register-Register Operations
 
 
@@ -792,6 +855,73 @@ class NopOp(NullaryOperation):
     name = "riscv.nop"
 
 
+# endregion
+
+# region RV32I/RV64I: 2.5 Control Transfer Instructions
+
+# Unconditional jumps
+
+
+@irdl_op_definition
+class JalOp(RdImmOperation):
+    """
+    Jump to address and place return address in rd.
+
+    jal mylabel is a pseudoinstruction for jal ra, mylabel
+
+    x[rd] = pc+4; pc += sext(offset)
+
+    https://msyksphinz-self.github.io/riscv-isadoc/html/rvi.html#jal
+    """
+
+    name = "riscv.jal"
+
+
+@irdl_op_definition
+class JOp(RdImmOperation):
+    """
+    A pseudo-instruction, for unconditional jumps you don't expect to return from.
+    Is equivalent to JalOp with `rd` = `x0`.
+    Used to be a part of the spec, removed in 2.0.
+    """
+
+    name = "riscv.j"
+
+    def __init__(self, immediate: int | AnyIntegerAttr | str | LabelAttr):
+        super().__init__(immediate, rd=Registers.ZERO)
+
+
+@irdl_op_definition
+class JalrOp(RdRsImmOperation):
+    """
+    Jump to address and place return address in rd.
+
+    ```
+    t = pc+4
+    pc = (x[rs1] + sext(offset)) & ~1
+    x[rd] = t
+    ```
+
+    https://msyksphinz-self.github.io/riscv-isadoc/html/rvi.html#jalr
+    """
+
+    name = "riscv.jalr"
+
+
+@irdl_op_definition
+class ReturnOp(NullaryOperation):
+    """
+    Pseudo-op for returning from subroutine.
+
+    Equivalent to `jalr x0, x1, 0`
+    """
+
+    name = "riscv.ret"
+
+    def __init__(self):
+        super().__init__()
+
+
 # Conditional Branches
 
 
@@ -873,7 +1003,9 @@ class BgeuOp(RsRsOffOperation):
     name = "riscv.bgeu"
 
 
-# RV32I/RV64I: 2.6 Load and Store Instructions
+# endregion
+
+# region RV32I/RV64I: 2.6 Load and Store Instructions
 
 
 @irdl_op_definition
@@ -986,7 +1118,9 @@ class SwOp(RsRsImmOperation):
     name = "riscv.sw"
 
 
-# RV32I/RV64I: 2.8 Control and Status Register Instructions
+# endregion
+
+# region RV32I/RV64I: 2.8 Control and Status Register Instructions
 
 
 @irdl_op_definition
@@ -1120,8 +1254,113 @@ class CsrrciOp(CsrBitwiseImmOperation):
     name = "riscv.csrrci"
 
 
-## Assembler pseudo-instructions
-## https://github.com/riscv-non-isa/riscv-asm-manual/blob/master/riscv-asm.md
+# endregion
+
+# region RV32M/RV64M: 7 “M” Standard Extension for Integer Multiplication and Division
+
+## Multiplication Operations
+
+
+@irdl_op_definition
+class MulOp(RdRsRsOperation):
+    """
+    Performs an XLEN-bit × XLEN-bit multiplication of signed rs1 by signed rs2
+    and places the lower XLEN bits in the destination register.
+    x[rd] = x[rs1] * x[rs2]
+
+    https://msyksphinz-self.github.io/riscv-isadoc/html/rvi.html#add
+    """
+
+    name = "riscv.mul"
+
+
+class MulhOp(RdRsRsOperation):
+    """
+    Performs an XLEN-bit × XLEN-bit multiplication of signed rs1 by signed rs2
+    and places the upper XLEN bits in the destination register.
+    x[rd] = (x[rs1] s×s x[rs2]) >>s XLEN
+
+    https://msyksphinz-self.github.io/riscv-isadoc/html/rvm.html#mulh
+    """
+
+    name = "riscv.mulh"
+
+
+class MulhsuOp(RdRsRsOperation):
+    """
+    Performs an XLEN-bit × XLEN-bit multiplication of signed rs1 by unsigned rs2
+    and places the upper XLEN bits in the destination register.
+    x[rd] = (x[rs1] s × x[rs2]) >>s XLEN
+
+    https://msyksphinz-self.github.io/riscv-isadoc/html/rvm.html#mulhsu
+    """
+
+    name = "riscv.mulhsu"
+
+
+class MulhuOp(RdRsRsOperation):
+    """
+    Performs an XLEN-bit × XLEN-bit multiplication of unsigned rs1 by unsigned rs2
+    and places the upper XLEN bits in the destination register.
+    x[rd] = (x[rs1] u × x[rs2]) >>u XLEN
+
+    https://msyksphinz-self.github.io/riscv-isadoc/html/rvm.html#mulhu
+    """
+
+    name = "riscv.mulhu"
+
+
+## Division Operations
+class DivOp(RdRsRsOperation):
+    """
+    Perform an XLEN bits by XLEN bits signed integer division of rs1 by rs2,
+    rounding towards zero.
+    x[rd] = x[rs1] /s x[rs2]
+
+    https://msyksphinz-self.github.io/riscv-isadoc/html/rvm.html#div
+    """
+
+    name = "riscv.div"
+
+
+class DivuOp(RdRsRsOperation):
+    """
+    Perform an XLEN bits by XLEN bits unsigned integer division of rs1 by rs2,
+    rounding towards zero.
+    x[rd] = x[rs1] /u x[rs2]
+
+    https://msyksphinz-self.github.io/riscv-isadoc/html/rvm.html#divu
+    """
+
+    name = "riscv.divu"
+
+
+class RemOp(RdRsRsOperation):
+    """
+    Perform an XLEN bits by XLEN bits signed integer reminder of rs1 by rs2.
+    x[rd] = x[rs1] %s x[rs2]
+
+    https://msyksphinz-self.github.io/riscv-isadoc/html/rvm.html#rem
+    """
+
+    name = "riscv.rem"
+
+
+class RemuOp(RdRsRsOperation):
+    """
+    Perform an XLEN bits by XLEN bits unsigned integer reminder of rs1 by rs2.
+    x[rd] = x[rs1] %u x[rs2]
+
+    https://msyksphinz-self.github.io/riscv-isadoc/html/rvm.html#remu
+    """
+
+    name = "riscv.remu"
+
+
+# endregion
+
+# region Assembler pseudo-instructions
+# https://github.com/riscv-non-isa/riscv-asm-manual/blob/master/riscv-asm.md
 
 
 @irdl_op_definition
@@ -1146,7 +1385,7 @@ class EcallOp(NullaryOperation):
     request are passed, but usually these will be in defined locations in the
     integer register file.
 
-    https://riscv.org/wp-content/uploads/2017/05/riscv-spec-v2.2.pdf
+    https://github.com/riscv/riscv-isa-manual/releases/download/Ratified-IMAFDQC/riscv-spec-20191213.pdf
     """
 
     name = "riscv.ecall"
@@ -1158,10 +1397,63 @@ class EbreakOp(NullaryOperation):
     The EBREAK instruction is used by debuggers to cause control to be
     transferred back to a debugging environment.
 
-    https://riscv.org/wp-content/uploads/2017/05/riscv-spec-v2.2.pdf
+    https://github.com/riscv/riscv-isa-manual/releases/download/Ratified-IMAFDQC/riscv-spec-20191213.pdf
     """
 
     name = "riscv.ebreak"
+
+
+@irdl_op_definition
+class WfiOp(NullaryOperation):
+    """
+    The Wait for Interrupt instruction (WFI) provides a hint to the
+    implementation that the current hart can be stalled until an
+    interrupt might need servicing.
+
+    https://github.com/riscv/riscv-isa-manual/releases/download/Priv-v1.12/riscv-privileged-20211203.pdf
+    """
+
+    name = "riscv.wfi"
+
+
+# endregion
+
+# RISC-V SSA Helpers
+
+
+@irdl_op_definition
+class GetRegisterOp(IRDLOperation, RISCVOp):
+    """
+    This instruction allows us to create an SSAValue with for a given register name. This
+    is useful for bridging the RISC-V convention that stores the result of function calls
+    in `a0` and `a1` into SSA form.
+
+    For example, to generate this assembly:
+    ```
+    jal my_func
+    add a0 s0 a0
+    ```
+
+    One needs to do the following:
+
+    ``` python
+    rhs = riscv.GetRegisterOp(Registers.s0).res
+    riscv.JalOp("my_func")
+    lhs = riscv.GetRegisterOp(Registers.A0).res
+    sum = riscv.AddOp(lhs, rhs, Registers.A0).rd
+    ```
+    """
+
+    name = "riscv.get_register"
+    res: Annotated[OpResult, RegisterType]
+
+    def __init__(
+        self,
+        register_type: RegisterType | Register,
+    ):
+        if isinstance(register_type, Register):
+            register_type = RegisterType(register_type)
+        super().__init__(result_types=[register_type])
 
 
 RISCV = Dialect(
@@ -1177,6 +1469,7 @@ RISCV = Dialect(
         SraiOp,
         LuiOp,
         AuipcOp,
+        MVOp,
         AddOp,
         SltOp,
         SltuOp,
@@ -1188,6 +1481,10 @@ RISCV = Dialect(
         SubOp,
         SraOp,
         NopOp,
+        JalOp,
+        JOp,
+        JalrOp,
+        ReturnOp,
         BeqOp,
         BneOp,
         BltOp,
@@ -1208,9 +1505,22 @@ RISCV = Dialect(
         CsrrwiOp,
         CsrrsiOp,
         CsrrciOp,
+        MulOp,
+        MulhOp,
+        MulhsuOp,
+        MulhuOp,
+        DivOp,
+        DivuOp,
+        RemOp,
+        RemuOp,
         LiOp,
         EcallOp,
         EbreakOp,
+        WfiOp,
+        GetRegisterOp,
     ],
-    [RegisterType],
+    [
+        RegisterType,
+        LabelAttr,
+    ],
 )
